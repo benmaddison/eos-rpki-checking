@@ -1,0 +1,4 @@
+Click==7.0
+py-radix==0.10.0
+pyeapi==0.8.3
+requests==2.23.0
