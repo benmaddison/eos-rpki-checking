@@ -27,8 +27,12 @@ Usage: eos-rpki-check.py [OPTIONS] HOSTNAME
   Compare EOS validation status to the expected results.
 
 Options:
-  -u, --username TEXT  EAPI Username
-  -p, --password TEXT  EAPI Password
-  --vrp-url TEXT       URL of the JSON serialised VRP set
-  --help               Show this message and exit.
+  -u, --username TEXT    EAPI Username
+  -p, --password TEXT    EAPI Password
+  -a, --afi [ipv4|ipv6]  Address family
+  -r, --print-roas       Print ROAs covering each prefix
+  -m, --print-matches    Print matching prefixes
+  -R, --remote-vrp-file  Get the VRP set from remote
+  --vrp-url TEXT         URL of the JSON serialised VRP set
+  --help                 Show this message and exit.
 ```
