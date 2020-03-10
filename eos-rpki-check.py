@@ -20,11 +20,16 @@ ROV_STATUS = {
 ROV_STATUS_NAME = {v: k for k, v in ROV_STATUS.items()}
 
 
-def fetch_vrp(url):
+def fetch_vrp(remote_vrp_file, url, node):
     """Fetch the current VRP set."""
-    response = requests.get(url, headers={"Accept": "application/json"})
-    response.raise_for_status()
-    vrp_data = response.json()
+    if remote_vrp_file:
+        response = requests.get(url, headers={"Accept": "application/json"})
+        response.raise_for_status()
+        vrp_data = response.json()
+    else:
+        cmd = "show bgp rpki roa ipv4"
+        vrp_data = node.enable([cmd])[0]["result"]
+        print(vrp_data)
     vrp_tree = radix.Radix()
     for roa in vrp_data["roas"]:
         prefix = roa["prefix"]
@@ -100,15 +105,17 @@ def compare_ov_state(vrp_tree, prefix, length, origin, status):
               prompt=True, default=lambda: os.environ.get("USER", ""))
 @click.option("--password", "-p", help="EAPI Password",
               prompt=True, hide_input=True)
+@click.option("--remote-vrp-file", "-r", help="Get the VRP set from remote",
+              is_flag=True)
 @click.option("--vrp-url", help="URL of the JSON serialised VRP set",
               default="https://rpki-vc1.wolcomm.net/api/export.json")
-def main(hostname, username, password, vrp_url):
+def main(hostname, username, password, remote_vrp_file, vrp_url):
     """Compare EOS validation status to the expected results."""
     passed = 0
     failed = 0
-    vrp_tree = fetch_vrp(vrp_url)
     node = pyeapi.connect(host=hostname, username=username, password=password,
                           return_node=True)
+    vrp_tree = fetch_vrp(remote_vrp_file, vrp_url, node)
     for n in range(256):
         cmd = f"show bgp ipv4 unicast {n}.0.0.0/8 longer-prefixes"
         data = node.enable([cmd])[0]
