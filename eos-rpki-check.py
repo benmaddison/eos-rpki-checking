@@ -28,6 +28,8 @@ BATCHES = {
              for n in ipaddress.ip_network("2000::/3").subnets(new_prefix=8)),
 }
 
+AS_PATH_RE = re.compile(r"(\d+)$")
+
 
 def fetch_vrp(remote_vrp_file, url, node, afi):
     """Fetch the current VRP set."""
@@ -49,14 +51,24 @@ def fetch_vrp(remote_vrp_file, url, node, afi):
     return vrp_tree
 
 
-def origin_as(path_entry):
+def get_local_as(node, vrf="default"):
+    """Discover the local AS of the node."""
+    cmd = "show bgp instance"
+    instance_data = node.enable([cmd])[0]["result"]["vrfs"][vrf]
+    return f"AS{instance_data['localAs']}"
+
+
+def origin_as(path_entry, local_as):
     """Get the origin AS of a path."""
-    as_path = path_entry["asPathEntry"]["asPath"]
-    try:
-        origin = re.findall(r"\d+", as_path)[-1]
-        return f"AS{origin}"
-    except IndexError:
-        return ""
+    as_path = path_entry["asPathEntry"]["asPath"].rstrip(" ie?")
+    as_path_search = AS_PATH_RE.search(as_path)
+    if not as_path:
+        origin = local_as
+    elif as_path_search:
+        origin = f"AS{as_path_search.group(1)}"
+    else:
+        origin = None
+    return origin
 
 
 def ov_status(path_entry):
@@ -64,17 +76,18 @@ def ov_status(path_entry):
     return ROV_STATUS[path_entry["routeType"]["originValidity"]]
 
 
-def iter_routes(routes_data, vrf="default"):
+def iter_routes(routes_data, local_as, vrf="default"):
     """Iterate over the prefix/path_data pairs in a BRIB dump."""
     route_entries = routes_data["result"]["vrfs"][vrf]["bgpRouteEntries"]
     for prefix, data in route_entries.items():
-        yield prefix, data["maskLength"], iter_paths(data["bgpRoutePaths"])
+        yield prefix, data["maskLength"], iter_paths(data["bgpRoutePaths"],
+                                                     local_as)
 
 
-def iter_paths(path_data):
+def iter_paths(path_data, local_as):
     """Iterate over the paths for a prefix in a BRIB dump."""
     for path_entry in path_data:
-        yield origin_as(path_entry), ov_status(path_entry)
+        yield origin_as(path_entry, local_as), ov_status(path_entry)
 
 
 def search_covering_roas(vrp_tree, prefix):
@@ -128,7 +141,7 @@ def result_line(match, prefix, origin, observed_status, expected_status):
     result = click.style(f"observed: {ROV_STATUS_NAME[observed_status]:14} "
                          f"expected: {ROV_STATUS_NAME[expected_status]:14}",
                          fg=color)
-    return f"{prefix:30} {origin:10} {result}"
+    return f"{prefix:30} {str(origin):10} {result}"
 
 
 def dump_roas(roas):
@@ -186,11 +199,12 @@ def main(hostname, username, password, afi, print_roas, print_matches,
     results = collections.defaultdict(collections.Counter)
     node = pyeapi.connect(host=hostname, username=username, password=password,
                           return_node=True)
+    local_as = get_local_as(node)
     vrp_tree = fetch_vrp(remote_vrp_file, vrp_url, node, afi)
     for network in BATCHES[afi]:
         cmd = f"show bgp {afi} unicast {network} longer-prefixes"
         data = node.enable([cmd])[0]
-        for prefix, length, paths in iter_routes(data):
+        for prefix, length, paths in iter_routes(data, local_as):
             for origin, status in paths:
                 match, expected, roas = compare_ov_state(vrp_tree, prefix,
                                                          length, origin,
