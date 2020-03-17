@@ -19,11 +19,16 @@ ROV_STATUS = {
     "valid": 1,
     "invalid": 2
 }
+ROV_EXTCOMM = {
+    "Origin-Validation-State:not-found": 0,
+    "Origin-Validation-State:valid": 1,
+    "Origin-Validation-State:invalid": 2
+}
 ROV_STATUS_NAME = {v: k for k, v in ROV_STATUS.items()}
 
 BATCHES = {
     "ipv4": (str(n)
-             for n in ipaddress.ip_network("0.0.0.0/0").subnets(new_prefix=6)),
+             for n in ipaddress.ip_network("0.0.0.0/0").subnets(new_prefix=8)),
     "ipv6": (str(n)
              for n in ipaddress.ip_network("2000::/3").subnets(new_prefix=8)),
 }
@@ -76,18 +81,33 @@ def ov_status(path_entry):
     return ROV_STATUS[path_entry["routeType"]["originValidity"]]
 
 
-def iter_routes(routes_data, local_as, vrf="default"):
+def extcomm_status(path_entry, extcomm):
+    """Get the received extcommunity status."""
+    if extcomm:
+        try:
+            for extcommunity in path_entry["routeDetail"]["extCommunityList"]:
+                try:
+                    return ROV_EXTCOMM[extcommunity]
+                except KeyError:
+                    continue
+        except KeyError:
+            pass
+    return None
+
+
+def iter_routes(routes_data, local_as, extcomm, vrf="default"):
     """Iterate over the prefix/path_data pairs in a BRIB dump."""
     route_entries = routes_data["result"]["vrfs"][vrf]["bgpRouteEntries"]
     for prefix, data in route_entries.items():
         yield prefix, data["maskLength"], iter_paths(data["bgpRoutePaths"],
-                                                     local_as)
+                                                     local_as, extcomm)
 
 
-def iter_paths(path_data, local_as):
+def iter_paths(path_data, local_as, extcomm):
     """Iterate over the paths for a prefix in a BRIB dump."""
     for path_entry in path_data:
-        yield origin_as(path_entry, local_as), ov_status(path_entry)
+        yield (origin_as(path_entry, local_as), ov_status(path_entry),
+               extcomm_status(path_entry, extcomm))
 
 
 def search_covering_roas(vrp_tree, prefix):
@@ -108,10 +128,10 @@ def compare_roa(roa, origin, length):
     return True
 
 
-def compare_ov_state(vrp_tree, prefix, length, origin, status):
+def compare_ov_state(vrp_tree, prefix, length, origin, status, ec_status):
     """Compute and compare validation state."""
     if status == ROV_STATUS["notValidated"]:
-        return True, ROV_STATUS["notValidated"], []
+        return True, ROV_STATUS["notValidated"], ec_status, []
     covered = False
     expected_status = None
     covering_roas = search_covering_roas(vrp_tree, prefix)
@@ -127,12 +147,15 @@ def compare_ov_state(vrp_tree, prefix, length, origin, status):
             expected_status = ROV_STATUS["notFound"]
     try:
         assert status == expected_status
+        if ec_status is not None:
+            assert status == ec_status
     except AssertionError:
-        return False, expected_status, covering_roas
-    return True, expected_status, covering_roas
+        return False, expected_status, ec_status, covering_roas
+    return True, expected_status, ec_status, covering_roas
 
 
-def result_line(match, prefix, origin, observed_status, expected_status):
+def result_line(match, prefix, origin,
+                observed_status, expected_status, received_status):
     """Format result output line."""
     if match:
         color = "green"
@@ -141,6 +164,9 @@ def result_line(match, prefix, origin, observed_status, expected_status):
     result = click.style(f"observed: {ROV_STATUS_NAME[observed_status]:14} "
                          f"expected: {ROV_STATUS_NAME[expected_status]:14}",
                          fg=color)
+    if received_status is not None:
+        result += click.style(f" received: {ROV_STATUS_NAME[received_status]:14}",  # noqa:E501
+                              fg=color)
     return f"{prefix:30} {str(origin):10} {result}"
 
 
@@ -150,9 +176,9 @@ def dump_roas(roas):
         click.echo(f"    {roa}")
 
 
-def print_results(results):
+def print_results(results, type):
     """Print results matrix."""
-    click.echo(f"{'':14}| Expected:")
+    click.echo(f"{'':14}| {type}:")
     click.echo("Observed:     | {}".format("".join([f"{i:>14}"
                                                     for i in ROV_STATUS])))
     for observed, o in ROV_STATUS.items():
@@ -191,25 +217,34 @@ def result_colored(results, observed, expected):
               is_flag=True)
 @click.option("--vrp-url", help="URL of the JSON serialised VRP set",
               default="https://rpki-vc1.wolcomm.net/api/export.json")
+@click.option("--extcomm", "-e", help="Compare local state with communities",
+              is_flag=True)
 def main(hostname, username, password, afi, print_roas, print_matches,
-         remote_vrp_file, vrp_url):
+         remote_vrp_file, vrp_url, extcomm):
     """Compare EOS validation status to the expected results."""
     passed = 0
     failed = 0
-    results = collections.defaultdict(collections.Counter)
+    local_results = collections.defaultdict(collections.Counter)
+    extcomm_results = collections.defaultdict(collections.Counter)
     node = pyeapi.connect(host=hostname, username=username, password=password,
                           return_node=True)
     local_as = get_local_as(node)
     vrp_tree = fetch_vrp(remote_vrp_file, vrp_url, node, afi)
     for network in BATCHES[afi]:
         cmd = f"show bgp {afi} unicast {network} longer-prefixes"
+        if extcomm:
+            cmd += " detail"
         data = node.enable([cmd])[0]
-        for prefix, length, paths in iter_routes(data, local_as):
-            for origin, status in paths:
-                match, expected, roas = compare_ov_state(vrp_tree, prefix,
-                                                         length, origin,
-                                                         status)
-                line = result_line(match, prefix, origin, status, expected)
+        for prefix, length, paths in iter_routes(data, local_as, extcomm):
+            for origin, status, ec_status in paths:
+                match, expected, received, roas = compare_ov_state(vrp_tree,
+                                                                   prefix,
+                                                                   length,
+                                                                   origin,
+                                                                   status,
+                                                                   ec_status)
+                line = result_line(match, prefix, origin,
+                                   status, expected, received)
                 if match:
                     passed += 1
                     if print_matches:
@@ -221,11 +256,14 @@ def main(hostname, username, password, afi, print_roas, print_matches,
                     click.echo(line)
                     if print_roas:
                         dump_roas(roas)
-                results[status][expected] += 1
+                local_results[status][expected] += 1
+                extcomm_results[status][received] += 1
     click.echo("Comparison results:")
     click.secho(f"  Passed: {passed}", fg="green")
     click.secho(f"  Failed: {failed}", fg="red")
-    print_results(results)
+    print_results(local_results, "Expected")
+    if extcomm:
+        print_results(extcomm_results, "Received Ext-Community")
     return
 
 
