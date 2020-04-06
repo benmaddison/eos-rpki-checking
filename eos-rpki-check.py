@@ -95,19 +95,21 @@ def extcomm_status(path_entry, extcomm):
     return None
 
 
-def iter_routes(routes_data, local_as, extcomm, vrf="default"):
+def iter_routes(routes_data, local_as, extcomm, next_hop, vrf="default"):
     """Iterate over the prefix/path_data pairs in a BRIB dump."""
     route_entries = routes_data["result"]["vrfs"][vrf]["bgpRouteEntries"]
     for prefix, data in route_entries.items():
         yield prefix, data["maskLength"], iter_paths(data["bgpRoutePaths"],
-                                                     local_as, extcomm)
+                                                     local_as, extcomm,
+                                                     next_hop)
 
 
-def iter_paths(path_data, local_as, extcomm):
+def iter_paths(path_data, local_as, extcomm, next_hop):
     """Iterate over the paths for a prefix in a BRIB dump."""
     for path_entry in path_data:
-        yield (origin_as(path_entry, local_as), ov_status(path_entry),
-               extcomm_status(path_entry, extcomm))
+        if not next_hop or path_entry["nextHop"] in next_hop:
+            yield (origin_as(path_entry, local_as), ov_status(path_entry),
+                   extcomm_status(path_entry, extcomm))
 
 
 def search_covering_roas(vrp_tree, prefix):
@@ -219,8 +221,10 @@ def result_colored(results, observed, expected):
               default="https://rpki-vc1.wolcomm.net/api/export.json")
 @click.option("--extcomm", "-e", help="Compare local state with communities",
               is_flag=True)
+@click.option("--next-hop", "-n", help="Filter paths on NEXT_HOP addresses",
+              multiple=True)
 def main(hostname, username, password, afi, print_roas, print_matches,
-         remote_vrp_file, vrp_url, extcomm):
+         remote_vrp_file, vrp_url, extcomm, next_hop):
     """Compare EOS validation status to the expected results."""
     passed = 0
     failed = 0
@@ -235,7 +239,8 @@ def main(hostname, username, password, afi, print_roas, print_matches,
         if extcomm:
             cmd += " detail"
         data = node.enable([cmd])[0]
-        for prefix, length, paths in iter_routes(data, local_as, extcomm):
+        for prefix, length, paths in iter_routes(data, local_as,
+                                                 extcomm, next_hop):
             for origin, status, ec_status in paths:
                 match, expected, received, roas = compare_ov_state(vrp_tree,
                                                                    prefix,
